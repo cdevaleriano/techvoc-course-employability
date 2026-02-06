@@ -1,0 +1,325 @@
+---
+title: "197 Paper Codes"
+author: "Martin, Pineda, Valeriano"
+date: "2025-12-17"
+output: html_document
+---
+
+```{r}
+library("MatchIt")
+library("cobalt")
+library("marginaleffects")
+```
+
+# Data Import and Cleaning
+
+```{r}
+library(readr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+LFS_PUF_October_2024 <- read_csv("PHL-PSA-LFS-2024-10-PUF/LFS PUF October 2024.CSV")
+LFS_PUF_October_2024$PUFC05_AGE <- as.numeric(LFS_PUF_October_2024$PUFC05_AGE)
+LFS_PUF_October_2024$PUFC43_QKB <- as.numeric(LFS_PUF_October_2024$PUFC43_QKB)
+LFS_PUF_October_2024$PUFREG <- as.numeric(LFS_PUF_October_2024$PUFREG)
+observables <- c("PUFREG" ,"PUFC04_SEX", "PUFC05_AGE", "PUFC06_MSTAT", "PUFC11_WORK", "PUFC07_GRADE", "PUFC08_CURSCH", "PUFC09_GRADTECH")
+
+
+# FILTER TO ATLEAST JHS GRAD & NOT AT SCHOOL
+
+df <- LFS_PUF_October_2024[observables] %>%
+  filter(PUFC07_GRADE > 24015, PUFC08_CURSCH != 1) %>%
+  mutate(
+    TREAT = ifelse(PUFC09_GRADTECH == 2, 0, 1),
+    OUTCOME = ifelse(PUFC11_WORK == 2 | is.na(PUFC11_WORK), 0, 1),
+  ) 
+
+MARITAL_STATUS <- c("Never Married", "Married", "Common-Law", "Widowed", "Divorced", "Separated", "Annulled", "Not Reported")
+
+df$PUFREG <- as.factor(df$PUFREG)
+df$PUFC04_SEX <- factor(df$PUFC04_SEX, levels = c(1,2), labels = c("Male", "Female"))
+df$PUFC06_MSTAT <- factor(df$PUFC06_MSTAT, levels = 1:8, labels = MARITAL_STATUS)
+
+LUZON_NO_NCR <- c(1, 2, 3, 4, 17, 5, 14)
+VISAYAS <- c(6, 7, 8)
+MINDANAO <- c(9, 10, 11, 12, 16, 19)
+
+```
+
+# Descriptives
+```{r}
+df %>%
+  group_by(TREAT) %>%
+  summarize(
+    "Count" = n(),
+    "Proportion of Employed" = mean(OUTCOME),
+    "Mean Age" = mean(PUFC05_AGE),
+    "Proportion of Females" = sum(PUFC04_SEX == "Female")/n())
+
+
+df %>% 
+  group_by(TREAT) %>%
+  summarize(
+    "Never Married" = sum(PUFC06_MSTAT == "Never Married")/n(),
+    "Married" = sum(PUFC06_MSTAT == "Married")/n(),
+    "Common-Law" = sum(PUFC06_MSTAT == "Common-Law")/n(),
+    "Widowed" = sum(PUFC06_MSTAT == "Widowed")/n(),
+    "Divorced" = sum(PUFC06_MSTAT == "Divorced")/n(),
+    "Separated" = sum(PUFC06_MSTAT == "Separated")/n(),
+    "Annulled" = sum(PUFC06_MSTAT == "Annulled")/n(),
+    "Not Reported" = sum(PUFC06_MSTAT == "Not Reported")/n(),
+  ) %>%
+  ungroup %>%
+  pivot_longer(
+    cols = MARITAL_STATUS,
+    names_to = "Marital Status"
+  )  %>%
+  ggplot(aes(x = factor(TREAT), y = value, fill = `Marital Status`)) +
+  geom_bar(position = "stack", stat = "identity") +
+  ylab("Percentage") +
+  xlab("Treatment")
+  
+```
+
+
+# Function for PSM
+
+```{r}
+psm <- function(df, algorithm, ratio = 5, distance, model){
+ 
+  formula <- as.formula(TREAT ~ PUFC04_SEX + PUFC05_AGE + PUFC06_MSTAT)  
+  
+  # Creates a NN model first
+  m.out <- matchit(formula = formula,
+                  data = df,
+                  method = "nearest", 
+                  ratio = ratio,  
+                  replace = T, 
+                  distance = distance, 
+                  link = model)
+  
+  # If full algorithm was indicated, replace with that instead.
+  if(algorithm == "full"){
+    m.out <- matchit(
+      formula = formula,
+      data = df,
+      method = "full", 
+      replace = F, 
+      distance = distance,
+      link = model)
+    }
+  
+  # Diagnostic Plots
+  plot(m.out, type = "density", interactive = FALSE, which.xs = ~ PUFC04_SEX + PUFC05_AGE + PUFC06_MSTAT)
+  print(love.plot(bal.tab(m.out, 
+                  m.threshold = 0.1),
+          stat = "mean.diffs",
+          grid = T,
+          stars = "raw",
+          abs = F))
+
+  # Computation of ATT Estimates
+  
+  m.df <- match.data(m.out)
+  fit <- lm(OUTCOME ~ TREAT, data = m.df) 
+  
+  print(summary(fit))
+
+  avg_comparisons(fit,
+    variables = "TREAT",
+    vcov = ~subclass,
+    newdata = subset(m.df, TREAT == 1)) 
+}
+```
+
+# OVERALL
+
+## Full
+
+```{r}
+psm(df,algorithm = "full", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df,algorithm = "full", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df,algorithm = "full", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df,algorithm = "full", distance = "mahalanobis", model = "probit")
+```
+
+## NN5
+
+```{r}
+psm(df,algorithm = "nearest", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df,algorithm = "nearest", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df,algorithm = "nearest", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df,algorithm = "nearest", distance = "mahalanobis", model = "probit")
+```
+
+# NCR
+
+## Full
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "full", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "full", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "full", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "full", distance = "mahalanobis", model = "probit")
+```
+
+## NN5
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "nearest", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "nearest", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "nearest", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG == 13,],algorithm = "nearest", distance = "mahalanobis", model = "probit")
+```
+
+
+# LUZON
+
+## Full
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "full", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "full", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "full", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "full", distance = "mahalanobis", model = "probit")
+```
+
+## NN5
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "nearest", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "nearest", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "nearest", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% LUZON_NO_NCR,],algorithm = "nearest", distance = "mahalanobis", model = "probit")
+```
+
+# VISAYAS
+
+## Full
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "full", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "full", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "full", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "full", distance = "mahalanobis", model = "probit")
+```
+
+## NN5
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "nearest", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "nearest", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "nearest", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% VISAYAS,],algorithm = "nearest", distance = "mahalanobis", model = "probit")
+```
+
+
+# MINDANAO
+
+## Full
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "full", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "full", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "full", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "full", distance = "mahalanobis", model = "probit")
+```
+
+## NN5
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "nearest", distance = "glm", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "nearest", distance = "mahalanobis", model = "logit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "nearest", distance = "glm", model = "probit")
+```
+
+```{r}
+psm(df[df$PUFREG %in% MINDANAO,],algorithm = "nearest", distance = "mahalanobis", model = "probit")
+```
